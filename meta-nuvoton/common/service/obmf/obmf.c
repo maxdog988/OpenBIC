@@ -2003,6 +2003,9 @@ static void ch0_cfg_sanitize(obmf_channel_config_header_t *hdr)
 		}
 		break;
 	}
+	case OBMF_ICP_CHANNEL_TYPE_I3C_CONTROLLER:
+		obmf_i3c_config_written((obmf_i3c_config_data_t *)data);
+		break;
 	default:
 		break;
 	}
