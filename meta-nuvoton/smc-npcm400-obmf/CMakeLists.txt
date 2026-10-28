@@ -117,4 +117,12 @@ target_include_directories(app PRIVATE src/lib)
 target_include_directories(app PRIVATE src/platform)
 
 # Fail build if there are any warnings
+# MCTP UUID of this device. mctpd identifies an endpoint by its UUID, so every
+# SMC on the same BMC needs a different node id, e.g.
+#   west build ... -- -DOBMF_MCTP_UUID_NODE=2
+if(NOT DEFINED OBMF_MCTP_UUID_NODE)
+    set(OBMF_MCTP_UUID_NODE 1)
+endif()
+target_compile_definitions(app PRIVATE OBMF_MCTP_UUID_NODE=${OBMF_MCTP_UUID_NODE})
+
 target_compile_options(app PRIVATE -Werror)

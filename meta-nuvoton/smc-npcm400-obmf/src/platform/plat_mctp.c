@@ -233,16 +233,21 @@ uint8_t pal_get_bmc_interface()
 
 uint8_t get_system_guid(uint16_t *data_len, uint8_t *data)
 {
-	/* Fake UUID for reference */
-	const uint8_t fake_guid[16] = { 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
-					0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F };
+	/*
+	 * RFC 4122 style UUID: fixed prefix plus the per-device node id, so
+	 * devices sharing one BMC (SMC1, SMC2) are never merged by mctpd.
+	 */
+	const uint32_t node = OBMF_MCTP_UUID_NODE;
+	const uint8_t guid[16] = { 'N', 'P', 'C', 'M', '4', '0', 0x40, 0x00,
+				   0x80, 0x00, 'O', 'B', (node >> 24) & 0xFF,
+				   (node >> 16) & 0xFF, (node >> 8) & 0xFF, node & 0xFF };
 
 	if (data == NULL || data_len == NULL) {
 		return GUID_FAIL_TO_ACCESS;
 	}
 
 	*data_len = 16;
-	memcpy(data, fake_guid, 16);
+	memcpy(data, guid, 16);
 
 	return GUID_READ_SUCCESS;
 }
