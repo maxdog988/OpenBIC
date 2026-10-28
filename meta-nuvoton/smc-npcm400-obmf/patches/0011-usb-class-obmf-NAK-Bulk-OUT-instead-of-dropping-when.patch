@@ -1,0 +1,177 @@
+From b091b68916834efcf8ae6f7476aa3fe26de36364 Mon Sep 17 00:00:00 2001
+From: Joseph Liu <kwliu@nuvoton.com>
+Date: Wed, 28 Oct 2026 09:52:31 +0800
+Subject: [PATCH] usb: class: obmf: NAK Bulk OUT instead of dropping when the
+ app is full
+
+Bulk OUT packets were copied to the application unconditionally and the
+excess was dropped, which desynchronized message framing and gave the host
+no indication. Add an optional rx_space() op: when a packet does not fit it
+is left in the endpoint FIFO so the endpoint keeps NAKing and the host
+controller retries. obmf_usb_rx_resume() restarts the read once space is
+freed, and a 1 ms delayed work polls as well so a missed wake-up cannot
+leave the packet pending forever.
+
+Reference: OCP OBMF-ICP over USB 1.0, Section 5 (Bulk endpoints, transfer behavior)
+Signed-off-by: Joseph Liu <kwliu@nuvoton.com>
+---
+ subsys/usb/class/obmf.c     | 67 +++++++++++++++++++++++++++++++------
+ subsys/usb/class/usb_obmf.h |  9 +++++
+ 2 files changed, 66 insertions(+), 10 deletions(-)
+
+diff --git a/subsys/usb/class/obmf.c b/subsys/usb/class/obmf.c
+index 27eb1c521bd..77233b4defb 100644
+--- a/subsys/usb/class/obmf.c
++++ b/subsys/usb/class/obmf.c
+@@ -201,39 +201,82 @@ void usb_obmf_register_device(const struct device *dev, const struct obmf_ops *o
+ /* Minimum OBMF-ICP message size (common header, 5 bytes) */
+ #define OBMF_ICP_HEADER_SIZE 5
+ 
+-static void obmf_out_cb(uint8_t ep, enum usb_dc_ep_cb_status_code ep_status)
++/*
++ * A Bulk OUT packet is left in the endpoint FIFO, with the endpoint NAKing,
++ * while the application has no room for it. The host controller then retries
++ * the transfer on its own, so no data is lost. obmf_usb_rx_resume() restarts
++ * the read once the application has freed space.
++ */
++static bool obmf_out_pending;
++static uint8_t obmf_out_pending_ep;
++static struct k_work_delayable obmf_out_resume_work;
++
++static void obmf_out_drain(uint8_t ep)
+ {
+ 	struct obmf_device_info *dev_data;
+ 	struct usb_dev_data *common;
+ 	uint32_t bytes_to_read;
++	unsigned int key = irq_lock();
+ 
+ 	common = usb_get_dev_data_by_ep(&usb_obmf_devlist, ep);
+ 	if (common == NULL) {
++		irq_unlock(key);
+ 		LOG_WRN("Device data not found for endpoint %u", ep);
+ 		return;
+ 	}
+ 
+ 	dev_data = CONTAINER_OF(common, struct obmf_device_info, common);
+ 
+-	if (ep_status != USB_DC_EP_DATA_OUT || dev_data->ops == NULL ||
+-	    dev_data->ops->read == NULL) {
++	if (dev_data->ops == NULL || dev_data->ops->read == NULL) {
++		irq_unlock(key);
+ 		return;
+ 	}
+ 
+ 	usb_read(ep, NULL, 0, &bytes_to_read);
+ 	LOG_DBG("ep 0x%x, bytes to read %d ", ep, bytes_to_read);
+ 
+-	/* [ERR-02] Discard if data is smaller than OBMF-ICP header */
+-	/*if (bytes_to_read < OBMF_ICP_HEADER_SIZE) {
+-		LOG_WRN("Received data (%u bytes) smaller than OBMF header, discarding",
+-			bytes_to_read);
+-		usb_read(ep, obmf_buf, bytes_to_read, NULL);
++	if (dev_data->ops->rx_space != NULL &&
++	    dev_data->ops->rx_space(common->dev) < bytes_to_read) {
++		/* Not reading the packet keeps the endpoint NAKing */
++		obmf_out_pending = true;
++		obmf_out_pending_ep = ep;
++		/* Also poll, in case the application has nothing left to wake us */
++		k_work_schedule(&obmf_out_resume_work, K_MSEC(1));
++		irq_unlock(key);
+ 		return;
+-	}*/
++	}
+ 
++	obmf_out_pending = false;
+ 	usb_read(ep, obmf_buf, bytes_to_read, NULL);
+-
+ 	dev_data->ops->read(common->dev, bytes_to_read, obmf_buf);
++	irq_unlock(key);
++}
++
++static void obmf_out_resume_handler(struct k_work *work)
++{
++	ARG_UNUSED(work);
++
++	if (obmf_out_pending) {
++		obmf_out_drain(obmf_out_pending_ep);
++	}
++}
++
++void obmf_usb_rx_resume(const struct device *dev)
++{
++	ARG_UNUSED(dev);
++
++	if (obmf_out_pending) {
++		k_work_reschedule(&obmf_out_resume_work, K_NO_WAIT);
++	}
++}
++
++static void obmf_out_cb(uint8_t ep, enum usb_dc_ep_cb_status_code ep_status)
++{
++	if (ep_status != USB_DC_EP_DATA_OUT) {
++		return;
++	}
++
++	obmf_out_drain(ep);
+ }
+ 
+ int obmf_usb_ep_write(const struct device *dev, const uint8_t *data,
+@@ -387,6 +430,7 @@ static void obmf_status_cb(struct usb_cfg_data *cfg,
+ 		 */
+ 		LOG_WRN("USB reset: clearing OBMF USB-layer RX buffer");
+ 		memset(obmf_buf, 0, sizeof(obmf_buf));
++		obmf_out_pending = false;
+ 		if (dev_data && dev_data->ops && dev_data->ops->bus_reset) {
+ 			dev_data->ops->bus_reset(common->dev);
+ 		}
+@@ -398,6 +442,7 @@ static void obmf_status_cb(struct usb_cfg_data *cfg,
+ 		 */
+ 		LOG_WRN("USB disconnected: clearing OBMF USB-layer RX buffer");
+ 		memset(obmf_buf, 0, sizeof(obmf_buf));
++		obmf_out_pending = false;
+ 		if (dev_data && dev_data->ops && dev_data->ops->bus_reset) {
+ 			dev_data->ops->bus_reset(common->dev);
+ 		}
+@@ -411,6 +456,7 @@ static void obmf_status_cb(struct usb_cfg_data *cfg,
+ 		 */
+ 		LOG_WRN("Endpoint halt cleared: flushing OBMF state");
+ 		memset(obmf_buf, 0, sizeof(obmf_buf));
++		obmf_out_pending = false;
+ 		if (dev_data && dev_data->ops && dev_data->ops->bus_reset) {
+ 			dev_data->ops->bus_reset(common->dev);
+ 		}
+@@ -483,6 +529,7 @@ static void obmf_interface_config(struct usb_desc_header *head,
+ 
+ static int usb_obmf_device_init(const struct device *dev)
+ {
++	k_work_init_delayable(&obmf_out_resume_work, obmf_out_resume_handler);
+ 	LOG_INF("Init OBMF USB Device: dev %p (%s)", dev, dev->name);
+ 	return 0;
+ }
+diff --git a/subsys/usb/class/usb_obmf.h b/subsys/usb/class/usb_obmf.h
+index e1fb83044a3..94f7632f624 100644
+--- a/subsys/usb/class/usb_obmf.h
++++ b/subsys/usb/class/usb_obmf.h
+@@ -16,6 +16,12 @@ extern "C" {
+ 
+ struct obmf_ops {
+ 	void (*read)(const struct device *dev, uint32_t len, uint8_t *data);
++	/*
++	 * Optional. Bytes the application can still accept in read(). When a
++	 * Bulk OUT packet does not fit, it is left in the endpoint FIFO (the
++	 * endpoint keeps NAKing) until obmf_usb_rx_resume() is called.
++	 */
++	uint32_t (*rx_space)(const struct device *dev);
+ #if CONFIG_OBMF_INTERRUPT_OUT_EP_SUPPORT
+ 	void (*int_read)(const struct device *dev, uint32_t len, uint8_t *data);
+ #endif
+@@ -44,6 +50,9 @@ struct obmf_ops {
+ void usb_obmf_register_device(const struct device *dev,
+ 			      const struct obmf_ops *ops);
+ 
++/* Call after rx_space() grew, to receive a Bulk OUT packet left pending */
++void obmf_usb_rx_resume(const struct device *dev);
++
+ int obmf_usb_ep_write(const struct device *dev, const uint8_t *data,
+ 		      uint32_t data_len, uint32_t *bytes_ret);
+ 

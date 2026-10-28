@@ -1,0 +1,41 @@
+From f1760d5dfbc39bf47fcb6ba6d64158b41d5f6c55 Mon Sep 17 00:00:00 2001
+From: Joseph Liu <kwliu@nuvoton.com>
+Date: Wed, 28 Oct 2026 09:43:07 +0800
+Subject: [PATCH] usb: class: obmf: reset OBMF state on
+ CLEAR_FEATURE(ENDPOINT_HALT)
+
+The spec requires the device to flush its internal pipelines and reset
+its counters when a STALL is cleared. Only the USB-layer RX buffer was
+cleared; also notify the application through the bus_reset hook so it
+drops fragment buffers and outstanding requests.
+
+Reference: OCP OBMF-ICP over USB 1.0, Section 5 (Error recovery, CLEAR_FEATURE(ENDPOINT_HALT))
+Signed-off-by: Joseph Liu <kwliu@nuvoton.com>
+---
+ subsys/usb/class/obmf.c | 11 +++++++----
+ 1 file changed, 7 insertions(+), 4 deletions(-)
+
+diff --git a/subsys/usb/class/obmf.c b/subsys/usb/class/obmf.c
+index 6372cfb85bc..27eb1c521bd 100644
+--- a/subsys/usb/class/obmf.c
++++ b/subsys/usb/class/obmf.c
+@@ -405,12 +405,15 @@ static void obmf_status_cb(struct usb_cfg_data *cfg,
+ 	case USB_DC_CLEAR_HALT:
+ 		/*
+ 		 * [1.0rc5 C6] CLEAR_FEATURE(ENDPOINT_HALT) received.
+-		 * Clear USB-layer RX buffer so the next transfer starts
+-		 * cleanly. Upper-layer state cleanup is the application's
+-		 * responsibility.
++		 * The device must flush its internal pipelines and reset its
++		 * counters, so clear the USB-layer RX buffer and have the
++		 * application drop its channel state like on a bus reset.
+ 		 */
+-		LOG_WRN("Endpoint halt cleared: clearing OBMF USB-layer RX buffer");
++		LOG_WRN("Endpoint halt cleared: flushing OBMF state");
+ 		memset(obmf_buf, 0, sizeof(obmf_buf));
++		if (dev_data && dev_data->ops && dev_data->ops->bus_reset) {
++			dev_data->ops->bus_reset(common->dev);
++		}
+ 		break;
+ 	case USB_DC_SET_HALT:
+ 		LOG_WRN("Endpoint halt set");

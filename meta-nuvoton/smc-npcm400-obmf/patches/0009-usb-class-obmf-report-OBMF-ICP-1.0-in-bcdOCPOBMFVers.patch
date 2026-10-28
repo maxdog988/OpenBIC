@@ -1,0 +1,28 @@
+From 67560c46506a6173e91fdb9f2c9cbb0df8883daf Mon Sep 17 00:00:00 2001
+From: Joseph Liu <kwliu@nuvoton.com>
+Date: Wed, 28 Oct 2026 09:36:53 +0800
+Subject: [PATCH] usb: class: obmf: report OBMF-ICP 1.0 in bcdOCPOBMFVersion
+
+bcdOCPOBMFVersion in the OCP_OBMF_FUNCTIONAL descriptor identifies the
+OBMF-ICP specification release implemented by the device, not the USB
+class document version. Report 1.0 (0x0100) instead of 0.80.
+
+Reference: OCP OBMF-ICP over USB 1.0, Section 5.4 (USB Descriptors for OCP OBMF-ICP Interface)
+Signed-off-by: Joseph Liu <kwliu@nuvoton.com>
+---
+ subsys/usb/class/obmf.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/subsys/usb/class/obmf.c b/subsys/usb/class/obmf.c
+index 68bef200a97..6372cfb85bc 100644
+--- a/subsys/usb/class/obmf.c
++++ b/subsys/usb/class/obmf.c
+@@ -124,7 +124,7 @@ struct usb_obmf_iface_str_descr obmf_iface_str = {
+ 		.wMaxRdTransferSize = sys_cpu_to_le16(rd_size), \
+ 		.wMaxWrInterruptSize = sys_cpu_to_le16(wr_int_size), \
+ 		.wMaxRdInterruptSize = sys_cpu_to_le16(rd_int_size), \
+-		.bcdOCPOBMFVersion = sys_cpu_to_le16(0x0080), /* 0.80 */ \
++		.bcdOCPOBMFVersion = sys_cpu_to_le16(0x0100), /* OBMF-ICP 1.0 */ \
+ 	}
+ 
+ #define INITIALIZER_EP_DESC(addr, attr, mps, interval) \

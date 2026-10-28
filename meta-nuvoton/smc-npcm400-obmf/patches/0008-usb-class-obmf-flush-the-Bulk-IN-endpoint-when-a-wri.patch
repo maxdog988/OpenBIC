@@ -1,0 +1,33 @@
+From 0efcba6eea0eb71c2f1cc762b65efdb6e194f216 Mon Sep 17 00:00:00 2001
+From: Joseph Liu <kwliu@nuvoton.com>
+Date: Tue, 27 Oct 2026 15:49:29 +0800
+Subject: [PATCH] usb: class: obmf: flush the Bulk IN endpoint when a write
+ fails
+
+When the host stops polling the Bulk IN endpoint (for example while the
+host driver is unbound), the write times out with the packet still in the
+endpoint FIFO. Later writes then fail too, and the host cannot complete
+discovery after it returns until SMC1 is reset. Flush the endpoint on a
+failed write so the next message starts with an empty FIFO.
+
+Reference: OCP OBMF Spec 1.0.0, Section 5.15 (OBMF-ICP Control Channel -
+Channel 0)
+
+Signed-off-by: Joseph Liu <kwliu@nuvoton.com>
+---
+ subsys/usb/class/obmf.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/subsys/usb/class/obmf.c b/subsys/usb/class/obmf.c
+index 6def734e6de..68bef200a97 100644
+--- a/subsys/usb/class/obmf.c
++++ b/subsys/usb/class/obmf.c
+@@ -247,6 +247,8 @@ int obmf_usb_ep_write(const struct device *dev, const uint8_t *data,
+ 				(uint8_t *)data, data_len, USB_TRANS_WRITE);
+ 	if (ret != data_len) {
+ 		LOG_ERR("Transfer failure");
++		/* The host stopped polling: drop the packet left in the FIFO */
++		usb_dc_ep_flush(cfg->endpoint[0].ep_addr);
+ 		return -EINVAL;
+ 	}
+ 
